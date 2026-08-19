@@ -1,3 +1,81 @@
 # Hyperliquid Balance Reconciler
 
-Initial repository setup. The historical-balance implementation is being developed on a feature branch and will be proposed through a pull request.
+Auditable tooling for reconstructing a Hyperliquid wallet's historical HyperCore and HyperEVM balances at a specified timestamp.
+
+The project is intentionally conservative: if a public API cannot prove historical completeness, the report says so rather than presenting an estimate as exact.
+
+## Example
+
+```bash
+hl-balance \
+  0xYOUR_WALLET_ADDRESS \
+  --at 2026-01-01T00:00:00 \
+  --timezone UTC \
+  --window-hours 24 \
+  --output historical_balance.json
+```
+
+## Year-end asset statement
+
+The primary report focuses on assets owned at the cutoff rather than valuing open perpetual positions. It works backwards from current token balances and reverses post-cutoff balance-changing activity.
+
+Included in the reconstruction:
+
+- HyperCore spot token balances and USDC/cash
+- separate Standard-mode perp cash when applicable
+- HYPE held in staking
+- spot buys and sells
+- realized perp PnL and fees
+- funding payments
+- deposits, withdrawals, and Core transfers
+- staking rewards
+- borrow/lend supply interest
+- linked subaccounts, with per-account confidence diagnostics
+
+Open perp notional and unrealized PnL are not part of the primary asset balance. They remain diagnostic context only.
+
+## Important limitations
+
+Hyperliquid's public history endpoints have response and global history limits. The reconciler splits busy time windows and flags evidence of missing history, but archival data remains the final fallback for an audit-grade reconstruction.
+
+Hyperliquid's default HyperEVM RPC does not provide historical-state calls. Exact historical HyperEVM balances need an independent archive RPC or indexed replay of raw HyperEVM blocks.
+
+Historical vault equity requires separate valuation if vault flows are material.
+
+## Install
+
+Python 3.11+ is required.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m pip install -e .
+```
+
+## HyperEVM archive RPC
+
+```bash
+hl-balance \
+  0xYOUR_WALLET_ADDRESS \
+  --at 2026-01-01T00:00:00 \
+  --timezone UTC \
+  --evm-rpc "$HYPEREVM_ARCHIVE_RPC" \
+  --output historical_balance.json
+```
+
+For known ERC-20 contracts, repeat `--erc20`.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Roadmap to an audit-grade total
+
+1. Validate the asset statement against target-date live/archive evidence.
+2. Resolve any account whose public history cannot be reconstructed to the cutoff.
+3. Reconstruct historical vault equity if vault flows are material.
+4. Add historical token prices for a cutoff USD/CAD valuation.
+5. Add archive-backed HyperEVM token discovery and historical balances.
+6. Use HyperCore archive replay whenever public history cannot reach the cutoff.
