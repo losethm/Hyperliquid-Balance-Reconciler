@@ -11,18 +11,7 @@ class HttpError(RuntimeError):
     pass
 
 
-def post_json(
-    url: str,
-    payload: dict[str, Any],
-    timeout: float = 30.0,
-    max_retries: int = 6,
-) -> Any:
-    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    req = Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "hl-balance-reconciler/0.1"},
-    )
+def _request_json(req: Request, timeout: float, max_retries: int) -> Any:
     for attempt in range(max_retries + 1):
         try:
             with urlopen(req, timeout=timeout) as response:
@@ -36,10 +25,30 @@ def post_json(
                     delay = min(2 ** attempt, 30)
                 time.sleep(max(delay, 1.0))
                 continue
-            raise HttpError(f"POST {url} failed: {exc}") from exc
+            raise HttpError(f"{req.method} {req.full_url} failed: {exc}") from exc
         except (URLError, TimeoutError) as exc:
             if attempt < min(max_retries, 2):
                 time.sleep(2 ** attempt)
                 continue
-            raise HttpError(f"POST {url} failed: {exc}") from exc
-    raise HttpError(f"POST {url} failed after retries")
+            raise HttpError(f"{req.method} {req.full_url} failed: {exc}") from exc
+    raise HttpError(f"{req.method} {req.full_url} failed after retries")
+
+
+def get_json(url: str, timeout: float = 30.0, max_retries: int = 6) -> Any:
+    req = Request(url, headers={"Accept": "application/json", "User-Agent": "hl-balance-reconciler/0.1"})
+    return _request_json(req, timeout, max_retries)
+
+
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout: float = 30.0,
+    max_retries: int = 6,
+) -> Any:
+    data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    req = Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "hl-balance-reconciler/0.1"},
+    )
+    return _request_json(req, timeout, max_retries)
