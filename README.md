@@ -29,6 +29,7 @@ Requested cutoff:
 - Flags the HyperCore fill-history limitation instead of assuming the public API is complete.
 - With an archive-capable HyperEVM RPC, binary-searches the exact EVM block at or immediately before the cutoff and queries native HYPE plus explicitly supplied ERC-20 balances.
 - Produces a JSON audit artifact containing source data and confidence notes.
+- Runs the June 1 target in GitHub Actions so live Hyperliquid API access happens in a reproducible cloud environment.
 
 ## Important limitations
 
