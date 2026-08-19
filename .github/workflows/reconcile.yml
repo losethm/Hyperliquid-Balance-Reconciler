@@ -1,0 +1,43 @@
+name: Reconcile historical balance
+
+on:
+  push:
+    branches:
+      - 'agent/**'
+  workflow_dispatch:
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: python -m pip install -e .
+
+      - name: Test
+        run: python -m unittest discover -s tests -v
+
+      - name: Reconcile June 1 target
+        run: |
+          hl-balance \
+            0xC2a16805C137FA13FE9c02a86d83Ec4cc2BcC897 \
+            --at 2026-06-01T00:00:00 \
+            --timezone America/Regina \
+            --window-hours 24 \
+            --output historical_balance_2026-06-01.json
+
+      - name: Upload reconciliation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-balance-2026-06-01
+          path: historical_balance_2026-06-01.json
+          if-no-files-found: warn
