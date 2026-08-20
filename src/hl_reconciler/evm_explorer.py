@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal
+import hashlib
+import json
 from typing import Any
 from urllib.parse import urlencode
 
@@ -45,10 +47,59 @@ class EtherscanCompatibleExplorer:
         if status == "0" and not (isinstance(result, list) and not result):
             message = payload.get("message") or result or "unknown explorer error"
             # Etherscan-style APIs often use status=0 for a legitimate empty result.
-            if isinstance(message, str) and "No transactions found" in message:
+            if isinstance(message, str) and "no transactions found" in message.lower():
                 return []
             raise ExplorerError(str(message))
         return result
+
+    def _account_history(
+        self,
+        action: str,
+        address: str,
+        start_block: int,
+        end_block: int,
+        page_size: int,
+        max_pages: int,
+    ) -> list[dict[str, Any]]:
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
+
+        rows: list[dict[str, Any]] = []
+        page_signatures: set[bytes] = set()
+        for page in range(1, max_pages + 1):
+            result = self._call(
+                "account",
+                action,
+                address=address,
+                startblock=start_block,
+                endblock=end_block,
+                page=page,
+                offset=page_size,
+                sort="asc",
+            )
+            if not isinstance(result, list):
+                raise ExplorerError(f"Explorer {action} returned a non-list result")
+            if not all(isinstance(row, dict) for row in result):
+                raise ExplorerError(f"Explorer {action} returned a non-object row")
+
+            signature = hashlib.sha256(
+                json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).digest()
+            if result and signature in page_signatures:
+                raise ExplorerError(
+                    f"Explorer repeated page {page} for {action}; history completeness is unknown"
+                )
+            page_signatures.add(signature)
+            rows.extend(result)
+            if len(result) < page_size:
+                return rows
+
+        raise ExplorerError(
+            f"Explorer {action} reached the {max_pages}-page safety limit; "
+            "history completeness is unknown"
+        )
 
     def block_by_timestamp(self, timestamp_s: int, closest: str = "before") -> int:
         result = self._call("block", "getblocknobytime", timestamp=timestamp_s, closest=closest)
@@ -60,26 +111,11 @@ class EtherscanCompatibleExplorer:
         start_block: int = 0,
         end_block: int = 999999999,
         page_size: int = 1000,
+        max_pages: int = 1_000,
     ) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            result = self._call(
-                "account",
-                "tokentx",
-                address=address,
-                startblock=start_block,
-                endblock=end_block,
-                page=page,
-                offset=page_size,
-                sort="asc",
-            )
-            batch = result if isinstance(result, list) else []
-            rows.extend(row for row in batch if isinstance(row, dict))
-            if len(batch) < page_size:
-                break
-            page += 1
-        return rows
+        return self._account_history(
+            "tokentx", address, start_block, end_block, page_size, max_pages
+        )
 
     def normal_transactions(
         self,
@@ -87,26 +123,11 @@ class EtherscanCompatibleExplorer:
         start_block: int = 0,
         end_block: int = 999999999,
         page_size: int = 1000,
+        max_pages: int = 1_000,
     ) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            result = self._call(
-                "account",
-                "txlist",
-                address=address,
-                startblock=start_block,
-                endblock=end_block,
-                page=page,
-                offset=page_size,
-                sort="asc",
-            )
-            batch = result if isinstance(result, list) else []
-            rows.extend(row for row in batch if isinstance(row, dict))
-            if len(batch) < page_size:
-                break
-            page += 1
-        return rows
+        return self._account_history(
+            "txlist", address, start_block, end_block, page_size, max_pages
+        )
 
     def internal_transactions(
         self,
@@ -114,26 +135,11 @@ class EtherscanCompatibleExplorer:
         start_block: int = 0,
         end_block: int = 999999999,
         page_size: int = 1000,
+        max_pages: int = 1_000,
     ) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            result = self._call(
-                "account",
-                "txlistinternal",
-                address=address,
-                startblock=start_block,
-                endblock=end_block,
-                page=page,
-                offset=page_size,
-                sort="asc",
-            )
-            batch = result if isinstance(result, list) else []
-            rows.extend(row for row in batch if isinstance(row, dict))
-            if len(batch) < page_size:
-                break
-            page += 1
-        return rows
+        return self._account_history(
+            "txlistinternal", address, start_block, end_block, page_size, max_pages
+        )
 
 
 def replay_erc20_balances(address: str, transfers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -167,7 +173,9 @@ def replay_erc20_balances(address: str, transfers: list[dict[str, Any]]) -> dict
     out: dict[str, dict[str, Any]] = {}
     for contract, value in raw.items():
         decimals = meta[contract]["decimals"]
-        qty = Decimal(value) / (Decimal(10) ** decimals) if decimals >= 0 else Decimal(value)
+        if decimals < 0:
+            raise ExplorerError(f"Token {contract} reported negative decimals")
+        qty = Decimal(value) / (Decimal(10) ** decimals)
         out[contract] = {
             **meta[contract],
             "raw_balance": str(value),
@@ -190,18 +198,19 @@ def replay_native_hype(
     target = address.lower()
     wei = 0
     for row in normal_txs:
-        if str(row.get("isError") or "0") != "0":
-            continue
         from_addr = str(row.get("from") or "").lower()
         to_addr = str(row.get("to") or "").lower()
         value = int(str(row.get("value") or "0"))
-        if to_addr == target:
-            wei += value
+        succeeded = str(row.get("isError") or "0") == "0"
+
         if from_addr == target:
-            wei -= value
             gas_used = int(str(row.get("gasUsed") or "0"))
             gas_price = int(str(row.get("gasPrice") or "0"))
             wei -= gas_used * gas_price
+            if succeeded:
+                wei -= value
+        if succeeded and to_addr == target:
+            wei += value
 
     for row in internal_txs:
         if str(row.get("isError") or "0") != "0":

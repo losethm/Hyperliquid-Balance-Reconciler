@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from collections import defaultdict
 from decimal import Decimal
@@ -10,7 +11,7 @@ from typing import Any, Callable
 
 from .evm_explorer import EtherscanCompatibleExplorer, replay_erc20_balances, replay_native_hype
 from .hypercore import HyperCoreClient
-from .hyperevm import EvmRpcClient, RpcError, find_block_at_or_before, wei_to_hype
+from .hyperevm import EvmRpcClient, find_block_at_or_before, wei_to_hype
 from .report import build_asset_statement, build_core_report
 from .timeutils import parse_local_cutoff, to_millis
 
@@ -46,7 +47,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--evm-explorer-key",
-        help="API key for an Etherscan/Blockscout-compatible HyperEVM explorer.",
+        default=os.environ.get("BLOCKSCOUT_API_KEY"),
+        help=(
+            "API key for an Etherscan/Blockscout-compatible HyperEVM explorer. "
+            "Defaults to the BLOCKSCOUT_API_KEY environment variable."
+        ),
     )
     p.add_argument(
         "--evm-explorer-url",
@@ -176,6 +181,7 @@ def _explorer_hyperevm(args: argparse.Namespace, cutoff_ms: int) -> dict[str, An
         "method": "explorer_event_replay",
         "block_number": block,
         "cutoff_timestamp_s": cutoff_s,
+        "native_hype_wei": str(int(native_hype * Decimal(10**18))),
         "native_hype": format(native_hype, "f"),
         "erc20_balances": nonzero_tokens,
         "event_counts": {
@@ -187,6 +193,84 @@ def _explorer_hyperevm(args: argparse.Namespace, cutoff_ms: int) -> dict[str, An
             "level": "high_for_erc20_review_native",
             "note": "ERC-20 balances are deterministic from complete Transfer-event history. Native HYPE replay should be cross-checked against archive state because an explorer may omit chain-specific/system value flows.",
         },
+    }
+
+
+def _archive_hyperevm(
+    rpc_url: str,
+    wallet: str,
+    cutoff_ms: int,
+    token_contracts: list[str],
+) -> dict[str, Any]:
+    evm = EvmRpcClient(rpc_url)
+    located = find_block_at_or_before(evm, cutoff_ms // 1000)
+    native = evm.native_balance(wallet, located.number)
+    tokens: list[dict[str, Any]] = []
+    token_errors = 0
+    for token in dict.fromkeys(contract.lower() for contract in token_contracts):
+        try:
+            tokens.append(
+                {
+                    "token": token,
+                    "raw_balance": str(evm.erc20_balance(token, wallet, located.number)),
+                }
+            )
+        except Exception as exc:
+            token_errors += 1
+            tokens.append({"token": token, "status": "error", "error": str(exc)})
+    return {
+        "status": "partial" if token_errors else "ok",
+        "method": "archive_rpc",
+        "block_number": located.number,
+        "block_timestamp_s": located.timestamp_s,
+        "native_hype_wei": str(native),
+        "native_hype": wei_to_hype(native),
+        "erc20_balances": tokens,
+        "token_query_errors": token_errors,
+    }
+
+
+def _compare_hyperevm_results(
+    explorer_result: dict[str, Any],
+    archive_result: dict[str, Any],
+) -> dict[str, Any]:
+    if archive_result.get("status") not in {"ok", "partial"}:
+        return {
+            "status": "unavailable",
+            "note": "Archive RPC cross-check did not complete.",
+        }
+
+    replay_tokens = {
+        str(row.get("contract") or "").lower(): str(row.get("raw_balance"))
+        for row in explorer_result.get("erc20_balances") or []
+        if isinstance(row, dict) and row.get("contract")
+    }
+    archive_tokens = {
+        str(row.get("token") or "").lower(): str(row.get("raw_balance"))
+        for row in archive_result.get("erc20_balances") or []
+        if isinstance(row, dict) and row.get("token")
+    }
+    token_checks = [
+        {
+            "contract": contract,
+            "explorer_raw_balance": replay_tokens.get(contract, "0"),
+            "archive_raw_balance": archive_tokens.get(contract),
+            "matches": archive_tokens.get(contract) == replay_tokens.get(contract, "0"),
+        }
+        for contract in sorted(replay_tokens.keys() | archive_tokens.keys())
+    ]
+    block_matches = explorer_result.get("block_number") == archive_result.get("block_number")
+    native_matches = explorer_result.get("native_hype_wei") == archive_result.get(
+        "native_hype_wei"
+    )
+    tokens_match = all(check["matches"] for check in token_checks)
+    matched = block_matches and native_matches and tokens_match
+    return {
+        "status": "matched" if matched else "mismatch",
+        "block_matches": block_matches,
+        "native_hype_matches": native_matches,
+        "erc20_balances_match": tokens_match,
+        "tokens": token_checks,
     }
 
 
@@ -250,25 +334,50 @@ def run(args: argparse.Namespace) -> dict:
     }
     if args.evm_explorer_key:
         try:
-            report["hyperevm"] = _explorer_hyperevm(args, cutoff_ms)
+            explorer_result = _explorer_hyperevm(args, cutoff_ms)
+            if args.evm_rpc:
+                token_contracts = [
+                    str(row["contract"])
+                    for row in explorer_result.get("erc20_balances") or []
+                    if isinstance(row, dict) and row.get("contract")
+                ]
+                token_contracts.extend(args.erc20)
+                try:
+                    archive_result = _archive_hyperevm(
+                        args.evm_rpc, args.wallet, cutoff_ms, token_contracts
+                    )
+                except Exception as exc:
+                    archive_result = {
+                        "status": "error",
+                        "method": "archive_rpc",
+                        "error": str(exc),
+                    }
+                explorer_result["archive_cross_check"] = archive_result
+                comparison = _compare_hyperevm_results(explorer_result, archive_result)
+                explorer_result["archive_comparison"] = comparison
+                if comparison["status"] == "matched":
+                    explorer_result["confidence"] = {
+                        "level": "high_for_discovered_assets_archive_matched",
+                        "note": (
+                            "Native HYPE and every explorer-discovered or explicitly requested "
+                            "token match archive state at the cutoff block. Token discovery "
+                            "completeness still depends on the explorer index."
+                        ),
+                    }
+                elif comparison["status"] == "mismatch":
+                    explorer_result["confidence"] = {
+                        "level": "review_required",
+                        "note": "Explorer replay does not match archive state at the cutoff block.",
+                    }
+            report["hyperevm"] = explorer_result
         except Exception as exc:
             report["hyperevm"] = {"status": "error", "method": "explorer_event_replay", "error": str(exc)}
     elif args.evm_rpc:
-        evm = EvmRpcClient(args.evm_rpc)
-        cutoff_s = cutoff_ms // 1000
         try:
-            located = find_block_at_or_before(evm, cutoff_s)
-            native = evm.native_balance(args.wallet, located.number)
-            tokens = [
-                {"token": token, "raw_balance": str(evm.erc20_balance(token, args.wallet, located.number))}
-                for token in args.erc20
-            ]
-            report["hyperevm"] = {
-                "status": "ok", "method": "archive_rpc", "block_number": located.number,
-                "block_timestamp_s": located.timestamp_s, "native_hype_wei": str(native),
-                "native_hype": wei_to_hype(native), "erc20_balances": tokens,
-            }
-        except (RpcError, ValueError) as exc:
+            report["hyperevm"] = _archive_hyperevm(
+                args.evm_rpc, args.wallet, cutoff_ms, args.erc20
+            )
+        except Exception as exc:
             report["hyperevm"] = {"status": "error", "method": "archive_rpc", "error": str(exc)}
     return report
 
