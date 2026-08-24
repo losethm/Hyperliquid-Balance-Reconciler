@@ -1,0 +1,62 @@
+name: Private HyperEVM reconstruction
+
+on:
+  push:
+    branches:
+      - agent/hyperevm-replay
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BLOCKSCOUT_API_KEY: ${{ secrets.BLOCKSCOUT_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: python -m pip install -e .
+      - name: Reconstruct and encrypt result
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, hashlib, hmac, json, os
+          from types import SimpleNamespace
+          from hl_reconciler.cli import _explorer_hyperevm
+          from hl_reconciler.timeutils import parse_local_cutoff, to_millis
+
+          key = os.environ['BLOCKSCOUT_API_KEY'].encode()
+          if not key:
+              raise RuntimeError('BLOCKSCOUT_API_KEY secret is missing')
+
+          def xor_stream(data: bytes, key: bytes) -> bytes:
+              stream = bytearray()
+              counter = 0
+              while len(stream) < len(data):
+                  stream.extend(hmac.new(key, counter.to_bytes(8, 'big'), hashlib.sha256).digest())
+                  counter += 1
+              return bytes(a ^ b for a, b in zip(data, stream))
+
+          encrypted_wallet = 'Q7awOn9WcxQXq6VnvPohemk6gKa5Hx/1OAcwss19mgVdNbV7XB98rA+W'
+          wallet = xor_stream(base64.b64decode(encrypted_wallet), key).decode()
+          cutoff_ms = to_millis(parse_local_cutoff('2026-06-01T00:00:00', 'America/Regina'))
+          args = SimpleNamespace(
+              wallet=wallet,
+              evm_explorer_url='https://api.blockscout.com/v2/api',
+              evm_explorer_key=key.decode(),
+              evm_explorer_chain_param='chain_id',
+          )
+          result = _explorer_hyperevm(args, cutoff_ms)
+          plaintext = json.dumps(result, sort_keys=True).encode()
+          ciphertext = xor_stream(plaintext, key)
+          with open('hyperevm_result.enc', 'wb') as f:
+              f.write(base64.b64encode(ciphertext))
+          PY
+      - name: Upload encrypted result
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyperevm-encrypted-result
+          path: hyperevm_result.enc
+          retention-days: 1
