@@ -66,37 +66,47 @@ def _block_timestamp(block: dict[str, Any]) -> int:
     return int(block["timestamp"], 16)
 
 
+def _is_invalid_height(exc: Exception) -> bool:
+    return "invalid block height" in str(exc).lower() or "block not found" in str(exc).lower()
+
+
 def find_block_at_or_before(
     client: EvmRpcClient,
     cutoff_s: int,
-    low: int = 1,
+    low: int = 0,
     high: int | None = None,
 ) -> LocatedBlock:
-    """Binary-search the last EVM block whose timestamp is <= cutoff_s.
+    """Binary-search the last existing EVM block whose timestamp is <= cutoff_s.
 
-    HyperEVM's RPC rejects block height 0, so the default lower bound is 1.
+    HyperEVM can use a nonzero EVM genesis height. Nonexistent lower heights are
+    treated as pre-genesis and skipped during the search.
     """
     if high is None:
         high = client.block_number()
-    if low < 1 or high < low:
+    if low < 0 or high < low:
         raise ValueError("invalid block search bounds")
 
-    first = client.block(low)
-    if _block_timestamp(first) > cutoff_s:
-        raise ValueError("cutoff predates the lower search bound")
-
-    best_number = low
-    best_ts = _block_timestamp(first)
+    best_number: int | None = None
+    best_ts: int | None = None
     left, right = low, high
     while left <= right:
         mid = (left + right) // 2
-        block = client.block(mid)
+        try:
+            block = client.block(mid)
+        except RpcError as exc:
+            if _is_invalid_height(exc):
+                left = mid + 1
+                continue
+            raise
         ts = _block_timestamp(block)
         if ts <= cutoff_s:
             best_number, best_ts = mid, ts
             left = mid + 1
         else:
             right = mid - 1
+
+    if best_number is None or best_ts is None:
+        raise ValueError("cutoff predates the first available HyperEVM block")
     return LocatedBlock(best_number, best_ts)
 
 
