@@ -42,13 +42,13 @@ jobs:
           python-version: '3.12'
       - name: Install
         run: python -m pip install -e .
-      - name: Query indexed historical ERC20 activity
+      - name: Validate historically touched ERC20 contracts
         shell: bash
         run: |
           python - <<'PY'
           import base64, hashlib, hmac, json, os
+          from decimal import Decimal
           from urllib.request import Request, urlopen
-          from urllib.error import HTTPError
           from hl_reconciler.hyperevm import EvmRpcClient, find_block_at_or_before, wei_to_hype
           from hl_reconciler.timeutils import parse_local_cutoff, to_millis
 
@@ -64,13 +64,6 @@ jobs:
                   counter += 1
               return bytes(a ^ b for a, b in zip(data, stream))
 
-          encrypted_wallet = 'Q7awOn9WcxQXq6VnvPohemk6gKa5Hx/1OAcwss19mgVdNbV7XB98rA+W'
-          wallet = xor_stream(base64.b64decode(encrypted_wallet), key).decode()
-          cutoff_ms = to_millis(parse_local_cutoff('2026-06-01T00:00:00', 'America/Regina'))
-          rpc = EvmRpcClient('https://rpc.hypurrscan.io/')
-          located = find_block_at_or_before(rpc, cutoff_ms // 1000)
-          native = rpc.native_balance(wallet, located.number)
-
           def post(path, payload):
               req = Request(
                   'https://trace.hypurrscan.io' + path,
@@ -78,19 +71,60 @@ jobs:
                   headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
                   method='POST',
               )
-              try:
-                  with urlopen(req, timeout=30) as resp:
-                      return {'http_status': resp.status, 'body': json.loads(resp.read().decode())}
-              except HTTPError as exc:
-                  return {'http_status': exc.code, 'body': exc.read().decode(errors='replace')}
+              with urlopen(req, timeout=30) as resp:
+                  return json.loads(resp.read().decode())
 
-          transfer_probe = post('/api/v1/indexed/erc20-transfers', {'address': wallet, 'limit': 1000})
+          encrypted_wallet = 'Q7awOn9WcxQXq6VnvPohemk6gKa5Hx/1OAcwss19mgVdNbV7XB98rA+W'
+          wallet = xor_stream(base64.b64decode(encrypted_wallet), key).decode()
+          cutoff_ms = to_millis(parse_local_cutoff('2026-06-01T00:00:00', 'America/Regina'))
+          cutoff_s = cutoff_ms // 1000
+          rpc = EvmRpcClient('https://rpc.hypurrscan.io/')
+          located = find_block_at_or_before(rpc, cutoff_s)
+          native = rpc.native_balance(wallet, located.number)
+
+          transfer_page = post('/api/v1/indexed/erc20-transfers', {'address': wallet, 'limit': 1000})
+          cutoff_rows = [
+              row for row in transfer_page.get('transfers', [])
+              if row.get('timestamp') and row['timestamp'] <= '2026-06-01T06:00:00Z'
+          ]
+          metadata = {}
+          for row in cutoff_rows:
+              token = str(row.get('token_address') or '').lower()
+              if token:
+                  metadata[token] = {
+                      'token': token,
+                      'symbol': row.get('token_symbol'),
+                      'name': row.get('token_name'),
+                      'decimals': int(row.get('token_decimals') or 0),
+                  }
+
+          historical = []
+          for token, item in sorted(metadata.items()):
+              raw = rpc.erc20_balance(token, wallet, located.number)
+              item = dict(item)
+              item['raw_balance'] = str(raw)
+              item['balance'] = format(Decimal(raw) / (Decimal(10) ** item['decimals']), 'f')
+              historical.append(item)
+
+          openapi_req = Request('https://trace.hypurrscan.io/api/v1/openapi.json', headers={'Accept': 'application/json'})
+          with urlopen(openapi_req, timeout=30) as resp:
+              spec = json.loads(resp.read().decode())
+          transfer_path = spec.get('paths', {}).get('/api/v1/indexed/erc20-transfers', {})
+          refs = {}
+          for name in ('PaginationRequest', 'Erc20TransfersResponse'):
+              if name in spec.get('components', {}).get('schemas', {}):
+                  refs[name] = spec['components']['schemas'][name]
+
           result = {
               'status': 'ok',
               'block_number': located.number,
               'block_timestamp_s': located.timestamp_s,
               'native_hype': wei_to_hype(native),
-              'transfer_probe': transfer_probe,
+              'transfer_total': transfer_page.get('total'),
+              'transfer_rows_returned': len(transfer_page.get('transfers', [])),
+              'unique_contracts_before_cutoff': len(metadata),
+              'erc20_balances': historical,
+              'pagination_schema': {'path': transfer_path, 'schemas': refs},
           }
           ciphertext = xor_stream(json.dumps(result, sort_keys=True).encode(), key)
           with open('hyperevm_result.enc', 'wb') as f:
