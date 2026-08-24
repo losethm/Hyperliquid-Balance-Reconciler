@@ -75,9 +75,9 @@ jobs:
           cutoff_ms = to_millis(parse_local_cutoff('2026-06-01T00:00:00', 'America/Regina'))
           args = SimpleNamespace(
               wallet=wallet,
-              evm_explorer_url='https://api.blockscout.com/v2/api',
+              evm_explorer_url='https://www.hyperscan.com/api',
               evm_explorer_key=key.decode(),
-              evm_explorer_chain_param='chain_id',
+              evm_explorer_chain_param='chainid',
           )
           result = _explorer_hyperevm(args, cutoff_ms)
           ciphertext = xor_stream(json.dumps(result, sort_keys=True).encode(), key)
