@@ -32,6 +32,7 @@ def _redact_url(url: str) -> str:
 
 
 def _request_json(req: Request, timeout: float, max_retries: int) -> Any:
+    method = req.get_method()
     for attempt in range(max_retries + 1):
         try:
             with urlopen(req, timeout=timeout) as response:
@@ -45,13 +46,13 @@ def _request_json(req: Request, timeout: float, max_retries: int) -> Any:
                     delay = min(2 ** attempt, 30)
                 time.sleep(max(delay, 1.0))
                 continue
-            raise HttpError(f"{req.method} {_redact_url(req.full_url)} failed: {exc}") from exc
+            raise HttpError(f"{method} {_redact_url(req.full_url)} failed: {exc}") from exc
         except (URLError, TimeoutError) as exc:
             if attempt < min(max_retries, 2):
                 time.sleep(2 ** attempt)
                 continue
-            raise HttpError(f"{req.method} {_redact_url(req.full_url)} failed: {exc}") from exc
-    raise HttpError(f"{req.method} {_redact_url(req.full_url)} failed after retries")
+            raise HttpError(f"{method} {_redact_url(req.full_url)} failed: {exc}") from exc
+    raise HttpError(f"{method} {_redact_url(req.full_url)} failed after retries")
 
 
 def get_json(url: str, timeout: float = 30.0, max_retries: int = 6) -> Any:
