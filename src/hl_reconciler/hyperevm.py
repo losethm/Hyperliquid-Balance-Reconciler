@@ -69,13 +69,16 @@ def _block_timestamp(block: dict[str, Any]) -> int:
 def find_block_at_or_before(
     client: EvmRpcClient,
     cutoff_s: int,
-    low: int = 0,
+    low: int = 1,
     high: int | None = None,
 ) -> LocatedBlock:
-    """Binary-search the last EVM block whose timestamp is <= cutoff_s."""
+    """Binary-search the last EVM block whose timestamp is <= cutoff_s.
+
+    HyperEVM's RPC rejects block height 0, so the default lower bound is 1.
+    """
     if high is None:
         high = client.block_number()
-    if low < 0 or high < low:
+    if low < 1 or high < low:
         raise ValueError("invalid block search bounds")
 
     first = client.block(low)
