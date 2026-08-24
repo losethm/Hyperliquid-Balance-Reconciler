@@ -105,6 +105,8 @@ When both `BLOCKSCOUT_API_KEY` and `--evm-rpc` are supplied, the report runs bot
 methods at the same cutoff and records block, native HYPE, and token-level match
 results under `archive_comparison`.
 
+Private validation runs should pass credentials through GitHub Actions secrets or local environment variables; wallet-specific values should not be committed to public workflows or examples.
+
 ## Tests
 
 ```bash
