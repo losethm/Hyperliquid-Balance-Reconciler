@@ -42,13 +42,13 @@ jobs:
           python-version: '3.12'
       - name: Install
         run: python -m pip install -e .
-      - name: Validate historical HyperEVM token balances
+      - name: Query indexed historical ERC20 activity
         shell: bash
         run: |
           python - <<'PY'
           import base64, hashlib, hmac, json, os
-          from decimal import Decimal
           from urllib.request import Request, urlopen
+          from urllib.error import HTTPError
           from hl_reconciler.hyperevm import EvmRpcClient, find_block_at_or_before, wei_to_hype
           from hl_reconciler.timeutils import parse_local_cutoff, to_millis
 
@@ -71,45 +71,26 @@ jobs:
           located = find_block_at_or_before(rpc, cutoff_ms // 1000)
           native = rpc.native_balance(wallet, located.number)
 
-          req = Request(
-              'https://trace.hypurrscan.io/api/v1/address/tokens/indexed',
-              data=json.dumps({'address': wallet}).encode(),
-              headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
-              method='POST',
-          )
-          with urlopen(req, timeout=30) as resp:
-              indexed = json.loads(resp.read().decode())
-
-          historical = []
-          for row in indexed.get('balances', []):
-              token = str(row.get('token') or '')
-              if not token:
-                  continue
-              item = {
-                  'token': token,
-                  'symbol': row.get('symbol'),
-                  'name': row.get('name'),
-                  'decimals': int(row.get('decimals') or 0),
-              }
+          def post(path, payload):
+              req = Request(
+                  'https://trace.hypurrscan.io' + path,
+                  data=json.dumps(payload).encode(),
+                  headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                  method='POST',
+              )
               try:
-                  raw = rpc.erc20_balance(token, wallet, located.number)
-                  item['raw_balance'] = str(raw)
-                  item['balance'] = format(Decimal(raw) / (Decimal(10) ** item['decimals']), 'f')
-                  item['status'] = 'ok'
-              except Exception as exc:
-                  item['status'] = 'error'
-                  item['error'] = str(exc)
-              historical.append(item)
+                  with urlopen(req, timeout=30) as resp:
+                      return {'http_status': resp.status, 'body': json.loads(resp.read().decode())}
+              except HTTPError as exc:
+                  return {'http_status': exc.code, 'body': exc.read().decode(errors='replace')}
 
+          transfer_probe = post('/api/v1/indexed/erc20-transfers', {'address': wallet, 'limit': 1000})
           result = {
               'status': 'ok',
-              'method': 'hypurrscan_archive_state_with_hypurrtrace_discovery',
               'block_number': located.number,
               'block_timestamp_s': located.timestamp_s,
-              'native_hype_wei': str(native),
               'native_hype': wei_to_hype(native),
-              'discovered_contracts': len(historical),
-              'erc20_balances': historical,
+              'transfer_probe': transfer_probe,
           }
           ciphertext = xor_stream(json.dumps(result, sort_keys=True).encode(), key)
           with open('hyperevm_result.enc', 'wb') as f:
