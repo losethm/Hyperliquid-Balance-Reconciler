@@ -47,7 +47,6 @@ jobs:
         run: |
           python - <<'PY'
           import base64, hashlib, hmac, json, os
-          from decimal import Decimal
           from hl_reconciler.hyperevm import EvmRpcClient, find_block_at_or_before, wei_to_hype
           from hl_reconciler.timeutils import parse_local_cutoff, to_millis
 
@@ -76,11 +75,9 @@ jobs:
           start_block = 27891176
           end_block = located.number
           contracts = set()
-          event_count = 0
-          chunks = 0
+          stats = {'event_count': 0, 'chunks': 0}
 
           def scan_range(lo: int, hi: int, depth: int = 0):
-              nonlocal event_count, chunks
               filters = [
                   {'fromBlock': hex(lo), 'toBlock': hex(hi), 'topics': [transfer_sig, wallet_topic]},
                   {'fromBlock': hex(lo), 'toBlock': hex(hi), 'topics': [transfer_sig, None, wallet_topic]},
@@ -90,12 +87,12 @@ jobs:
                       rows = rpc.call('eth_getLogs', [filt])
                       if not isinstance(rows, list):
                           raise RuntimeError('eth_getLogs returned non-list')
-                      event_count += len(rows)
+                      stats['event_count'] += len(rows)
                       for row in rows:
                           address = str(row.get('address') or '').lower()
                           if address:
                               contracts.add(address)
-                  chunks += 1
+                  stats['chunks'] += 1
               except Exception:
                   if lo >= hi or depth >= 12:
                       raise
@@ -129,8 +126,8 @@ jobs:
               'native_hype': wei_to_hype(native),
               'late_scan_start_block': start_block,
               'late_scan_end_block': end_block,
-              'log_events': event_count,
-              'scan_chunks': chunks,
+              'log_events': stats['event_count'],
+              'scan_chunks': stats['chunks'],
               'late_contracts': historical,
           }
           ciphertext = xor_stream(json.dumps(result, sort_keys=True).encode(), key)
