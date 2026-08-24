@@ -71,7 +71,7 @@ When an archive RPC is unavailable, the reconciler can rebuild balances from an 
 
 The explorer path finds the last block at or before the cutoff, paginates through the wallet's ERC-20, normal-transaction, and internal-transaction history, and replays the flows. It aborts when pagination repeats or reaches its safety limit rather than presenting a potentially truncated result as complete.
 
-ERC-20 replay is exact only when the explorer index is complete. Native HYPE also needs an archive-state cross-check because chain-specific or system balance changes may not appear in explorer account-history endpoints.
+ERC-20 replay is exact only when the explorer index is complete. Native HYPE also needs an archive-state cross-check because chain-specific or system balance changes may not appear in explorer account-history endpoints. Indexed token discovery can be paired with archive-state `balanceOf` calls for a stronger cutoff snapshot.
 
 Private validation runs should pass credentials through GitHub Actions secrets or local environment variables; wallet-specific values should not be committed to public workflows or examples.
 
