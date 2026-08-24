@@ -67,43 +67,11 @@ For known ERC-20 contracts, repeat `--erc20`.
 
 ## HyperEVM explorer replay
 
-When an archive RPC is unavailable, the reconciler can rebuild balances from an
-Etherscan/Blockscout-compatible explorer. Keep the API key outside the command line
-and repository by supplying it through the environment:
+When an archive RPC is unavailable, the reconciler can rebuild balances from an Etherscan/Blockscout-compatible explorer. Keep credentials outside the command line and repository by supplying them through the environment.
 
-```bash
-export BLOCKSCOUT_API_KEY="proapi_xxxxxxxxxxxxx"
-hl-balance \
-  0xYOUR_WALLET_ADDRESS \
-  --at 2026-01-01T00:00:00 \
-  --timezone UTC \
-  --output historical_balance.json
-```
+The explorer path finds the last block at or before the cutoff, paginates through the wallet's ERC-20, normal-transaction, and internal-transaction history, and replays the flows. It aborts when pagination repeats or reaches its safety limit rather than presenting a potentially truncated result as complete.
 
-PowerShell equivalent:
-
-```powershell
-$env:BLOCKSCOUT_API_KEY = "proapi_xxxxxxxxxxxxx"
-hl-balance `
-  0xYOUR_WALLET_ADDRESS `
-  --at 2026-01-01T00:00:00 `
-  --timezone UTC `
-  --output historical_balance.json
-```
-
-The explorer path finds the last block at or before the cutoff, paginates through
-the wallet's ERC-20, normal-transaction, and internal-transaction history, and
-replays the flows. It aborts when pagination repeats or reaches its safety limit
-rather than presenting a potentially truncated result as complete.
-
-ERC-20 replay is exact only when the explorer index is complete. Native HYPE also
-needs an archive-state cross-check because chain-specific or system balance changes
-may not appear in explorer account-history endpoints. Failed outgoing transactions
-still consume gas and are included in the native replay.
-
-When both `BLOCKSCOUT_API_KEY` and `--evm-rpc` are supplied, the report runs both
-methods at the same cutoff and records block, native HYPE, and token-level match
-results under `archive_comparison`.
+ERC-20 replay is exact only when the explorer index is complete. Native HYPE also needs an archive-state cross-check because chain-specific or system balance changes may not appear in explorer account-history endpoints.
 
 Private validation runs should pass credentials through GitHub Actions secrets or local environment variables; wallet-specific values should not be committed to public workflows or examples.
 
