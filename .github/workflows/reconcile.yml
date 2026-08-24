@@ -16,18 +16,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install
         run: python -m pip install -e .
-
       - name: Test
         run: python -m unittest discover -s tests -v
-
       - name: CLI help smoke test
         run: hl-balance --help
 
@@ -40,22 +36,18 @@ jobs:
     steps:
       - name: Checkout PR code
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install
         run: python -m pip install -e .
-
-      - name: Reconstruct and encrypt result
+      - name: Query historical HyperEVM state and encrypt result
         shell: bash
         run: |
           python - <<'PY'
           import base64, hashlib, hmac, json, os
-          from types import SimpleNamespace
-          from hl_reconciler.cli import _explorer_hyperevm
+          from hl_reconciler.hyperevm import EvmRpcClient, find_block_at_or_before, wei_to_hype
           from hl_reconciler.timeutils import parse_local_cutoff, to_millis
 
           key = os.environ['BLOCKSCOUT_API_KEY'].encode()
@@ -73,18 +65,21 @@ jobs:
           encrypted_wallet = 'Q7awOn9WcxQXq6VnvPohemk6gKa5Hx/1OAcwss19mgVdNbV7XB98rA+W'
           wallet = xor_stream(base64.b64decode(encrypted_wallet), key).decode()
           cutoff_ms = to_millis(parse_local_cutoff('2026-06-01T00:00:00', 'America/Regina'))
-          args = SimpleNamespace(
-              wallet=wallet,
-              evm_explorer_url='https://www.hyperscan.com/api',
-              evm_explorer_key=key.decode(),
-              evm_explorer_chain_param='chainid',
-          )
-          result = _explorer_hyperevm(args, cutoff_ms)
+          rpc = EvmRpcClient('https://rpc.hypurrscan.io/')
+          located = find_block_at_or_before(rpc, cutoff_ms // 1000)
+          native = rpc.native_balance(wallet, located.number)
+          result = {
+              'status': 'ok',
+              'method': 'hypurrscan_historical_rpc',
+              'block_number': located.number,
+              'block_timestamp_s': located.timestamp_s,
+              'native_hype_wei': str(native),
+              'native_hype': wei_to_hype(native),
+          }
           ciphertext = xor_stream(json.dumps(result, sort_keys=True).encode(), key)
           with open('hyperevm_result.enc', 'wb') as f:
               f.write(base64.b64encode(ciphertext))
           PY
-
       - name: Upload encrypted result
         uses: actions/upload-artifact@v4
         with:
